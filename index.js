@@ -1,5 +1,10 @@
 import axios from "axios";
-import fs from "fs";
+import { Client, GatewayIntentBits, Partials } from "discord.js";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+process.env.TZ = "Europe/Stockholm";
 
 const xscope = "8a22163c-8662-4535-9050-bc5e1923df48";
 
@@ -40,7 +45,6 @@ async function fetchData() {
     );
 
     const renderKey = keyRes.data?.data?.key;
-    console.log("Key:", renderKey);
 
     requestJson.renderKey = renderKey;
 
@@ -58,59 +62,16 @@ async function fetchData() {
         !lesson.texts.some((text) => text.toLowerCase().includes("körning")),
     );
 
-    /* Example output
-    Filtered Lessons: [
-      {
-        guidId: 'MGJiOWZiNGYtYWM5MC1mZGVjLWE2NzktNjliZGNjOGY1NGE5',
-        texts: [ 'Studiebesök Volvo' ],
-        timeStart: '11:00:00',
-        timeEnd: '15:45:00',
-        dayOfWeekNumber: 1,
-        blockName: ''
-      },
-      {
-        guidId: 'NjJiZGI2MzgtZGJjNC1mZGY3LTg2NGUtYzBhNDRlNGRlMmI5',
-        texts: [ 'Studiebesök Renova' ],
-        timeStart: '12:00:00',
-        timeEnd: '15:45:00',
-        dayOfWeekNumber: 2,
-        blockName: ''
-      },
-      {
-        guidId: 'MzBjMGY3YjUtNGI0Ni1mYWI2LWFiMjItMzU2NjM4NjA3NGEz',
-        texts: [ 'GODE1000X', 'THO', 'Terminalen,' ],
-        timeStart: '08:30:00',
-        timeEnd: '11:30:00',
-        dayOfWeekNumber: 3,
-        blockName: ''
-      },
-      {
-        guidId: 'MzUyMjA4NmYtZWExMy1mNWM4LWEyZGUtN2FmODZmN2MzY2Ux',
-        texts: [ 'GODE1000X', 'THO', 'Terminalen,' ],
-        timeStart: '12:45:00',
-        timeEnd: '15:45:00',
-        dayOfWeekNumber: 3,
-        blockName: ''
-      },
-      {
-        guidId: 'OWI2ZWY1NmItMmIzYy1mZDk3LWJiZDctOWNiNWI0YjI1YTFm',
-        texts: [ 'YRKS100VX', 'THO', '120,' ],
-        timeStart: '12:45:00',
-        timeEnd: '15:45:00',
-        dayOfWeekNumber: 5,
-        blockName: ''
-      }
-    ]
-    */
-
-    filteredLessons.push({
-      guidId: "test-lesson",
-      texts: ["Test Lesson"],
-      timeStart: "00:00:00",
-      timeEnd: "23:59:59",
-      dayOfWeekNumber: new Date().getDay(),
-      blockName: "",
-    });
+    if (process.env.DEV === "true") {
+      filteredLessons.push({
+        guidId: "test-lesson",
+        texts: ["Test Lesson"],
+        timeStart: "00:00:00",
+        timeEnd: "23:59:59",
+        dayOfWeekNumber: new Date().getDay(),
+        blockName: "",
+      });
+    }
 
     // Check if any lessons are right now
     const now = new Date();
@@ -122,13 +83,11 @@ async function fetchData() {
       return lesson.timeStart <= currentTime && lesson.timeEnd >= currentTime;
     });
 
-    console.log("Ongoing Lessons:", ongoingLessons);
+    return ongoingLessons;
   } catch (error) {
     console.error("Error fetching data:", error.response?.data || error);
   }
 }
-
-fetchData();
 
 function getISOWeek(date = new Date()) {
   const d = new Date(
@@ -139,3 +98,71 @@ function getISOWeek(date = new Date()) {
   const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
   return Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
 }
+
+function unixForTodayAt(timeStr, baseDate = new Date()) {
+  const [hh, mm, ss = "0"] = timeStr.split(":");
+  const d = new Date(baseDate);
+  d.setHours(Number(hh), Number(mm), Number(ss), 0);
+  return Math.floor(d.getTime() / 1000);
+}
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+});
+
+client.once("clientReady", () => {
+  console.log(`Logged in as ${client.user.tag}`);
+});
+
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+
+  // Check if process.env.DISCORD_USER_ID is mentioned
+  let tagged = false;
+  message.mentions.users.forEach((user) => {
+    if (user.id === process.env.DISCORD_USER_ID) {
+      tagged = true;
+    }
+  });
+
+  // Check if reply to the user
+  if (message.reference) {
+    try {
+      const referencedMessage = await message.channel.messages.fetch(
+        message.reference.messageId,
+      );
+      if (referencedMessage.author.id === process.env.DISCORD_USER_ID) {
+        tagged = true;
+      }
+    } catch (error) {
+      console.error("Error fetching referenced message:", error);
+    }
+  }
+
+  if (!tagged) return;
+
+  const ongoingLessons = await fetchData();
+
+  if (ongoingLessons && ongoingLessons.length > 0) {
+    const now = new Date();
+
+    let reply = "Mackan kan inte svara just nu, han har följande lektion:\n";
+
+    ongoingLessons.forEach((lesson) => {
+      const endUnix = unixForTodayAt(lesson.timeEnd, now);
+      // Optional: also show start relative
+      const startUnix = unixForTodayAt(lesson.timeStart, now);
+
+      reply += `- ${lesson.texts[0]} (slutar <t:${endUnix}:R>, alltså <t:${endUnix}:t>)\n`;
+    });
+
+    message.reply(reply);
+  }
+});
+
+client.login(process.env.DISCORD_TOKEN);
